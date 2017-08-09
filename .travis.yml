@@ -1,0 +1,30 @@
+language: cpp
+os: linux
+addons:
+  apt:
+    sources:
+      - ubuntu-toolchain-r-test
+    packages:
+      - lcov
+      - libstdc++6
+      - libboost-dev
+      - libmysqlclient-dev
+      - zlib1g-dev
+before_install:
+  - export OCLINT_HOME="$HOME/oclint"
+  - export PATH="$OCLINT_HOME/bin:$PATH"
+  - mkdir -p $OCLINT_HOME
+  # - curl -OL https://github.com/oclint/oclint/releases/download/v0.12/oclint-0.12-x86_64-linux-4.4.0-66-generic.tar.gz
+  # - tar xf oclint-0.12-x86_64-linux-4.4.0-66-generic.tar.gz -C $OCLINT_HOME --strip-components=1
+  # - rm oclint-0.12-x86_64-linux-4.4.0-66-generic.tar.gz
+  - curl -OL https://github.com/oclint/oclint/releases/download/v0.12/oclint-0.12-x86_64-linux-3.13.0-112-generic.tar.gz
+  - tar xf oclint-0.12-x86_64-linux-3.13.0-112-generic.tar.gz -C $OCLINT_HOME --strip-components=1
+  - rm oclint-0.12-x86_64-linux-3.13.0-112-generic.tar.gz
+  - oclint -version
+script:
+  - mkdir build
+  - cd build
+  - cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ../Tracker
+  - cd ..
+  - cp build/compile_commands.json .
+  - oclint-json-compilation-database

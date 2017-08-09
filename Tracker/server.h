@@ -134,7 +134,7 @@ public:
 			wait_time = 0;
 			user_vip = 0;
 			user_vip_exp = 0;
-			user_park = 0;	
+			user_park = 0;
 			user_active = 1;
 		}
 
@@ -215,6 +215,8 @@ private:
 		table_users,
 
 		// TorrentPier begin
+		table_users_dlstatus,
+		table_torrents_activity,
 		column_files_dl_percent,
 		column_users_can_leech,
 		column_users_torrents_limit,

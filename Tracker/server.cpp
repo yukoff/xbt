@@ -1504,6 +1504,10 @@ std::string Cserver::table_name(int v) const
 		return m_config.m_table_scrape_log.empty() ? m_table_prefix + "scrape_log" : m_config.m_table_scrape_log;
 	case table_users:
 		return m_config.m_table_users.empty() ? m_table_prefix + "users" : m_config.m_table_users;
+	case table_users_dlstatus:
+		return m_config.m_table_users_dlstatus.empty() ? m_table_prefix + "users_dlstatus" : m_config.m_table_users_dlstatus;
+	case table_torrents_activity:
+		return m_config.m_table_torrents_activity.empty() ? m_table_prefix + "tor_dl_stat" : m_config.m_table_torrents_activity;
 	}
 	assert(false);
 	return "";
@@ -1527,7 +1531,7 @@ int Cserver::test_sql()
 		m_database.query("select " + column_name(column_users_uid) + ", auth_key, "
                 + column_name(column_users_can_leech) + " as u_cl, " + column_name(column_users_torrents_limit)
                 + " as u_tl, u_down_total, u_up_total, u_up_release, u_down_today, u_up_today, u_up_bonus, max_up_speed, max_down_speed from " + table_name(table_users) + " where 0");
-	
+
 		m_database.query("select bbt.info_hash, bt.seeder, bbt.reg_time, bbt.size, bbt.attach_id, bbt.topic_id, bbt.seeder_last_seen, bt.speed_up, bt.speed_down, bbt.poster_id, "
                    + column_name(column_files_dl_percent) + " from " + table_name(table_files) + " bbt LEFT JOIN bb_bt_tracker bt ON (bt.topic_id = bbt.topic_id) where 0");
 		// TorrentPier: Files deletion table = table_name(table_files) + "_del" suffix

@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "config.h"
 
+#include <find_ptr.h>
 #include <socket.h>
 
 Cconfig::Cconfig()
@@ -59,7 +60,8 @@ void Cconfig::fill_maps(const Cconfig* v)
 
 			// TorrentPier begin
 			"max_seeds_bonus", &m_max_seeds_bonus, 5,
-                        "bonus_mb_per_hour", &m_bonus_mb_per_hour, 10,
+			"bonus_mb_per_hour", &m_bonus_mb_per_hour, 10,
+			"cheat_upload", &m_cheat_upload, 18,
 			"read_files_interval", &m_read_files_interval, 60,
 			// TorrentPier end
 
@@ -93,6 +95,8 @@ void Cconfig::fill_maps(const Cconfig* v)
 			"torrent_pass_private_key", &m_torrent_pass_private_key, "",
 
 			// TorrentPier begin
+			"table_users_dlstatus", &m_table_users_dlstatus, "",
+			"table_torrents_activity", &m_table_torrents_activity, "",
 			"column_files_dl_percent", &m_column_files_dl_percent, "",
 			"column_users_can_leech", &m_column_users_can_leech, "",
 			"column_users_torrents_limit", &m_column_users_torrents_limit, "",
@@ -111,9 +115,8 @@ void Cconfig::fill_maps(const Cconfig* v)
 
 int Cconfig::set(const std::string& name, const std::string& value)
 {
-	t_attributes<std::string>::iterator i = m_attributes_string.find(name);
-	if (i != m_attributes_string.end())
-		*i->second.value = value;
+	if (t_attribute<std::string>* i = find_ptr(m_attributes_string, name))
+		*i->value = value;
 	else if (name == "listen_ipa")
 
 	// TorrentPier begin
@@ -129,9 +132,8 @@ int Cconfig::set(const std::string& name, const std::string& value)
 
 int Cconfig::set(const std::string& name, int value)
 {
-	t_attributes<int>::iterator i = m_attributes_int.find(name);
-	if (i != m_attributes_int.end())
-		*i->second.value = value;
+	if (t_attribute<int>* i = find_ptr(m_attributes_int, name))
+		*i->value = value;
 	// TorrentPier // listen_port
 	else
 		return set(name, static_cast<bool>(value));
@@ -140,9 +142,8 @@ int Cconfig::set(const std::string& name, int value)
 
 int Cconfig::set(const std::string& name, bool value)
 {
-	t_attributes<bool>::iterator i = m_attributes_bool.find(name);
-	if (i != m_attributes_bool.end())
-		*i->second.value = value;
+	if (t_attribute<bool>* i = find_ptr(m_attributes_bool, name))
+		*i->value = value;
 	else
 		return 1;
 	return 0;

@@ -7,8 +7,9 @@
 #include "tcp_listen_socket.h"
 #include "tracker_input.h"
 #include "udp_listen_socket.h"
-#include <boost/array.hpp>
 #include <boost/ptr_container/ptr_list.hpp>
+#include <boost/ptr_container/ptr_map.hpp>
+#include <find_ptr.h>
 #include <map>
 #include <sql/database.h>
 #include <xbt/virtual_binary.h>
@@ -56,7 +57,7 @@ public:
 		bool xbt_error_empty;
 		// Upload Greatest Common Divisor
 		long long ul_gdc, ul_gdc_16k;
-		int ul_gdc_count, ul_16k_count, ul_eq_dl_count;
+		int ul_gdc_count, ul_16k_count, ul_eq_dl_count, end_vip;
 
 		bool ipv6set;
 		// boost::array<char, 16> ipv6;
@@ -131,6 +132,10 @@ public:
 			peers_limit = 0;
 			torrents_limit = 0;
 			wait_time = 0;
+			user_vip = 0;
+			user_vip_exp = 0;
+			user_park = 0;	
+			user_active = 1;
 		}
 
 		bool can_leech;
@@ -142,12 +147,11 @@ public:
 		std::string passkey;
 		int torrents_limit;
 		int wait_time;
+		int user_vip;
+		int user_vip_exp;
+		int user_park;
+		int user_active;
 	};
-
-	typedef std::map<std::string, t_file> t_files;
-	typedef std::map<unsigned int, t_deny_from_host> t_deny_from_hosts;
-	typedef std::map<int, t_user> t_users;
-	typedef std::map<std::string, t_user*> t_users_torrent_passes;
 
 	int test_sql();
 	void accept(const Csocket&);
@@ -172,8 +176,7 @@ public:
 
 	const t_file* file(const std::string& id) const
 	{
-		t_files::const_iterator i = m_files.find(id);
-		return i == m_files.end() ? NULL : &i->second;
+		return find_ptr(m_files, id);
 	}
 
 	const Cconfig& config() const
@@ -221,6 +224,10 @@ private:
 	typedef boost::ptr_list<Cconnection> t_connections;
 	typedef std::list<Ctcp_listen_socket> t_tcp_sockets;
 	typedef std::list<Cudp_listen_socket> t_udp_sockets;
+	typedef std::map<std::string, t_file> t_files;
+	typedef std::map<unsigned int, t_deny_from_host> t_deny_from_hosts;
+	typedef std::map<int, t_user> t_users;
+	typedef std::map<std::string, t_user*> t_users_torrent_passes;
 
 	static void sig_handler(int v);
 	std::string column_name(int v) const;
@@ -262,5 +269,7 @@ private:
 	// TorrentPier begin
 	std::string m_users_dl_status_buffer;
 	std::string m_tor_dl_stat_buffer;
+	std::string m_cheat_buffer;
+	std::string m_vip_buffer;
 	// TorrentPier end
 };

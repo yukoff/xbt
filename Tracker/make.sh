@@ -1,4 +1,4 @@
-g++ $@ -DEPOLL -DNDEBUG -I ../misc -I . -O3 -o ../../xbt_tracker \
+g++ $@ -DEPOLL -DNDEBUG -I ../misc -I . -O3 -o xbt_tracker \
 	../misc/sql/database.cpp \
 	../misc/sql/sql_query.cpp \
 	../misc/sql/sql_result.cpp \
@@ -18,4 +18,4 @@ g++ $@ -DEPOLL -DNDEBUG -I ../misc -I . -O3 -o ../../xbt_tracker \
 	transaction.cpp \
 	udp_listen_socket.cpp \
 	"XBT Tracker.cpp" \
-	`mysql_config --libs` && strip ../../xbt_tracker
+	`mysql_config --libs` && strip xbt_tracker

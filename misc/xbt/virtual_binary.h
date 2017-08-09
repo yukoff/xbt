@@ -1,6 +1,7 @@
 #pragma once
 
-#include <boost/intrusive_ptr.hpp>
+#include <boost/make_shared.hpp>
+#include <boost/shared_ptr.hpp>
 #include <boost/utility.hpp>
 #include <cassert>
 #include <const_memory_range.h>
@@ -10,17 +11,10 @@ class Cvirtual_binary_source: boost::noncopyable
 {
 public:
 	Cvirtual_binary_source(const_memory_range);
-	Cvirtual_binary_source* pre_edit();
 
 	~Cvirtual_binary_source()
 	{
 		delete[] m_range.begin;
-	}
-
-	unsigned char* data_edit()
-	{
-		assert(mc_references == 1);
-		return m_range;
 	}
 
 	memory_range range()
@@ -30,24 +24,11 @@ public:
 
 	void resize(size_t v)
 	{
-		assert(mc_references == 1 && v <= m_range.size());
+		assert(v <= m_range.size());
 		m_range.end = m_range.begin + v;
-	}
-
-	friend void intrusive_ptr_add_ref(Cvirtual_binary_source* v)
-	{
-		v->mc_references++;
-	}
-
-	friend void intrusive_ptr_release(Cvirtual_binary_source* v)
-	{
-		v->mc_references--;
-		if (!v->mc_references)
-			delete v;
 	}
 private:
 	memory_range m_range;
-	int mc_references;
 };
 
 class Cvirtual_binary
@@ -84,9 +65,7 @@ public:
 
 	unsigned char* data_edit()
 	{
-		assert(m_source);
-		m_source = m_source->pre_edit();
-		return m_source->data_edit();
+		return mutable_range().begin;
 	}
 
 	const unsigned char* end() const
@@ -108,13 +87,14 @@ public:
 	{
 		if (!m_source)
 			return memory_range();
-		m_source = m_source->pre_edit();
+		if (!m_source.unique())
+			m_source = boost::make_shared<Cvirtual_binary_source>(range());
 		return m_source->range();
 	}
 
 	bool empty() const
 	{
-		return !range().size();
+		return range().empty();
 	}
 
 	size_t size() const
@@ -126,7 +106,7 @@ public:
 	{
 		if (!m_source)
 			write_start(v);
-		m_source = m_source->pre_edit();
+		mutable_range();
 		m_source->resize(v);
 	}
 
@@ -142,8 +122,8 @@ public:
 
 	operator memory_range()
 	{
-		return memory_range(data_edit(), size());
+		return mutable_range();
 	}
 private:
-	boost::intrusive_ptr<Cvirtual_binary_source> m_source;
+	boost::shared_ptr<Cvirtual_binary_source> m_source;
 };

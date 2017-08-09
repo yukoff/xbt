@@ -9,11 +9,12 @@
 #include <signal.h>
 #include <bt_misc.h>
 #include <bt_strings.h>
+#include <find_ptr.h>
 #include <stream_int.h>
 #include "transaction.h"
 
 // TorrentPier begin
-
+#include "md5.h"
 #ifdef WIN32
 #include <Ws2tcpip.h>
 #endif
@@ -23,7 +24,7 @@ long long gcd(long long a, long long b) {
   while (b) {
      c = a % b;
      a = b;
-     b = c;        
+     b = c;
   }
   return a;
 }
@@ -91,7 +92,7 @@ int Cserver::run()
 				else if (l.setsockopt(SOL_SOCKET, SO_REUSEADDR, true),
 					::bind(s, res->ai_addr, res->ai_addrlen))
 					std::cerr << "bind failed: " << Csocket::error2a(WSAGetLastError()) << std::endl;
-				else if (::listen(s, 4096))
+				else if (::listen(s, INT_MAX))
 					std::cerr << "listen failed: " << Csocket::error2a(WSAGetLastError()) << std::endl;
 				else
 				{
@@ -147,23 +148,8 @@ int Cserver::run()
 #ifndef WIN32
 	if (m_config.m_daemon)
 	{
-#if 1
 		if (daemon(true, false))
 			std::cerr << "daemon failed" << std::endl;
-#else
-		switch (fork())
-		{
-		case -1:
-			std::cerr << "fork failed" << std::endl;
-			break;
-		case 0:
-			break;
-		default:
-			exit(0);
-		}
-		if (setsid() == -1)
-			std::cerr << "setsid failed" << std::endl;
-#endif
 		std::ofstream(m_config.m_pid_file.c_str()) << getpid() << std::endl;
 		struct sigaction act;
 		act.sa_handler = sig_handler;
@@ -177,9 +163,7 @@ int Cserver::run()
 	}
 #endif
 #ifdef EPOLL
-	const int c_events = 64;
-
-	epoll_event events[c_events];
+	boost::array<epoll_event, 64> events;
 #else
 	fd_set fd_read_set;
 	fd_set fd_write_set;
@@ -188,7 +172,7 @@ int Cserver::run()
 	while (!g_sig_term)
 	{
 #ifdef EPOLL
-		int r = m_epoll.wait(events, c_events, 5000);
+		int r = m_epoll.wait(events.data(), events.size(), 5000);
 		if (r == -1)
 			std::cerr << "epoll_wait failed: " << errno << std::endl;
 		else
@@ -347,6 +331,10 @@ std::string Cserver::insert_peer(const Ctracker_input& v, bool udp, t_user* user
 	std::string xbt_error = "";
 	if (v.m_left && v.m_event != Ctracker_input::e_paused && user && !user->can_leech && !m_config.m_free_leech)
 		/*if (xbt_error.empty())*/ xbt_error = bts_can_not_leech;
+	if (v.m_left && user && user->user_park) //park
+		xbt_error = bts_park;
+	if (user && user->user_active == 0) //unactive
+		xbt_error = bts_disabled;
 	if (!file.ctime)
 		file.ctime = time();
 	if (v.m_left && v.m_event != Ctracker_input::e_paused &&
@@ -354,20 +342,20 @@ std::string Cserver::insert_peer(const Ctracker_input& v, bool udp, t_user* user
 		/*return*/ if (xbt_error.empty()) xbt_error = bts_wait_time;
 
 	t_peers::key_type peer_key = v.m_peer_id;
-	t_peers::iterator i = file.peers.find(peer_key);
-	if (i != file.peers.end())
+	t_peer* i = find_ptr(file.peers, peer_key);
+	if (i)
 	{
-		if (i->second.xbt_error_empty)
+		if (i->xbt_error_empty)
 		{
-			(i->second.left != e_seeder ? file.leechers : file.seeders)--;
-			if (t_user* old_user = find_user_by_uid(i->second.uid))
-				(i->second.left == e_downloader ? old_user->incompletes : old_user->completes)--;
+			(i->left != e_seeder ? file.leechers : file.seeders)--;
+			if (t_user* old_user = find_user_by_uid(i->uid))
+				(i->left == e_downloader ? old_user->incompletes : old_user->completes)--;
 		}
 
-		file.speed_ul -= i->second.speed_ul, file.speed_dl -= i->second.speed_dl;
+		file.speed_ul -= i->speed_ul, file.speed_dl -= i->speed_dl;
 	}
 
-	if (i != file.peers.end() && i->second.xbt_error_empty) { }
+	if (i && i->xbt_error_empty) { }
 	else if (v.m_left && v.m_event != Ctracker_input::e_paused &&
 	         user && user->torrents_limit && user->incompletes >= user->torrents_limit && !m_config.m_free_leech)
 	{
@@ -387,50 +375,40 @@ std::string Cserver::insert_peer(const Ctracker_input& v, bool udp, t_user* user
 
 	long long downloaded = 0, downloaded_db = 0, downspeed = 0;
 	long long uploaded = 0, upspeed = 0;
-	long long bonus_rate = 0;
+	long long bonus = 0;
+	long long rel = 0;
 	long long ul_gdc = 0, ul_gdc_16k = 0;
 	int ul_gdc_count = 0, ul_16k_count = 0, ul_eq_dl_count = 0;
+	int end_vip = 0;
 
 	bool ipv6set = v.m_ipv6set && (v.m_family == AF_INET6 || m_config.m_trust_ipv6);
 
 	if (m_use_sql && user && file.fid)
 	{
-		if (user->uid == file.tor_poster_id)
-		{
-			bonus_rate = 100;
-		}
-		else if (!v.m_left && file.seeders == 1)
-		{
-			bonus_rate = 100;
-		}
-		else if (!v.m_left && file.seeders<m_config.m_max_seeds_bonus && file.seeders>0)
-		{
-			bonus_rate = 100 / (file.seeders);
-		}
 
 		long long timespent = 0;
-		if (i != file.peers.end()
-			// && boost::equals(i->second.peer_id, v.m_peer_id)
-			&& v.m_downloaded >= i->second.downloaded
-			&& v.m_uploaded >= i->second.uploaded)
+		if (i
+			// && boost::equals(i->peer_id, v.m_peer_id)
+			&& v.m_downloaded >= i->downloaded
+			&& v.m_uploaded >= i->uploaded)
 		{
-			downloaded = v.m_downloaded - i->second.downloaded;
-			uploaded = v.m_uploaded - i->second.uploaded;
+			downloaded = v.m_downloaded - i->downloaded;
+			uploaded = v.m_uploaded - i->uploaded;
 
 			if( downloaded > 100000000000ll || uploaded > 100000000000ll ) {
 				downloaded = uploaded = 0; // anti-hack
 				if (xbt_error.empty()) xbt_error = bts_banned_client;
 			}
-			timespent = time() - i->second.mtime;
+			timespent = time() - i->mtime;
 			if ((timespent << 1) > m_config.m_announce_interval)
 			{
 				upspeed = uploaded / timespent;
 				downspeed = downloaded / timespent;
 			}
-			ul_gdc_count = i->second.ul_gdc_count;
-			ul_16k_count = i->second.ul_16k_count;
-			ul_gdc_16k = i->second.ul_gdc_16k;
-			ul_eq_dl_count = i->second.ul_eq_dl_count;
+			ul_gdc_count = i->ul_gdc_count;
+			ul_16k_count = i->ul_16k_count;
+			ul_gdc_16k = i->ul_gdc_16k;
+			ul_eq_dl_count = i->ul_eq_dl_count;
 			if( uploaded && m_config.m_gdc )
 			{
 				ul_gdc_count++;
@@ -449,66 +427,99 @@ std::string Cserver::insert_peer(const Ctracker_input& v, bool udp, t_user* user
 				else
 				{
 					if( ul_gdc_count > 1 )
-						ul_gdc = gcd(uploaded, i->second.ul_gdc);
+						ul_gdc = gcd(uploaded, i->ul_gdc);
 					else
 						ul_gdc = uploaded;
 				}
 			}
 			else
 			{
-				ul_gdc = i->second.ul_gdc;
+				ul_gdc = i->ul_gdc;
 			}
 
 			downloaded_db = (m_config.m_free_leech || file.dl_percent<0) ? 0 : (downloaded * file.dl_percent /100);
+			if (user->user_vip == 2 && user->user_vip_exp < time()) end_vip = 1; //vip
+			if (user->user_vip > 0 && end_vip == 0) downloaded_db = 0; //vip
+
+			if (user->uid == file.tor_poster_id) rel = uploaded;
+			else if (!v.m_left && file.seeders == 1) bonus = 1;
 
 			// TorrentPier: bb_bt_users_dl_status
-			int new_status = v.m_left ? 1 : 2;
-			if (new_status != i->second.dl_status && file.tor_topic_id) {
+			int new_status = v.m_left ? 0 : 1;
+			if (user->uid == file.tor_poster_id) new_status = -1;
+			if (new_status != i->dl_status && file.tor_topic_id) {
 				Csql_query q(m_database, "(?,?,?,?),"); // topic_id,user_id,user_status,update_time
 				q.p(file.tor_topic_id); // topic_id
 				q.p(user->uid); // user_id
 				q.p(new_status);
 				q.p(time());
 				m_users_dl_status_buffer += q.read();
-				i->second.dl_status = new_status;
+				i->dl_status = new_status;
 			}
-			// TorrentPier: bb_bt_tor_dl_stat
-			if (uploaded || downloaded) {
-				Csql_query q(m_database, "(?,?,?,?,?,?),"); // torrent_id,user_id,attach_id,t_up_total,t_down_total
-				q.p(file.fid); // torrent_id
+
+			// TorrentPier: bb_bt_torrent_activity
+			int user_status = new_status;
+			if (new_status == -1) new_status = 2;
+			Csql_query q(m_database, "(?,?,?,?,?,?,?,?,?,?,?,?),");
+			q.p(user->uid); // user_id
+			q.p(file.tor_topic_id); // torrent_id
+			q.p(uploaded);
+			q.p(downloaded_db);
+			q.p(upspeed); // speed_up mediumint(8) unsigned NOT NULL default '0',
+			q.p(downspeed); // speed_down mediumint(8) unsigned NOT NULL default '0',
+			q.p(new_status);
+			q.p(bonus ? uploaded/bonus : 0);
+			q.p(user_status);
+			q.p(downloaded);
+			q.p(time());
+			q.p(m_config.m_announce_interval); //torrent_time
+			m_tor_dl_stat_buffer += q.read();
+
+			// TorrentPier: bb_cheat_log
+			long long cheat = (long long) m_config.m_cheat_upload * 1024 * 1024 * 1024;
+			if (uploaded > cheat) {
+				Csql_query q(m_database, "(?,?,?,?),"); // torrent_id,user_id,attach_id,t_up_total,t_down_total
 				q.p(user->uid); // user_id
-				q.p(file.tor_attach_id); // attach_id
 				q.p(uploaded);
-				q.p(downloaded_db);
-			//	q.p(bonus_rate ? uploaded * bonus_rate / 100 : 0);
-				q.p(bonus_rate ? uploaded * bonus_rate / 100 + m_config.m_write_db_interval / 3600 * m_config.m_bonus_mb_per_hour : 0);
-				m_tor_dl_stat_buffer += q.read();
+				q.p(hex_encode(8, ntohl(v.m_ipa)));
+				q.p(time());
+				m_cheat_buffer += q.read();
+			}
+
+			//vip
+			if (end_vip) {
+				Csql_query q(m_database, "(?),"); // user_id
+				q.p(user->uid); // user_id
+				m_vip_buffer += q.read();
 			}
 		}
-		Csql_query q(m_database, "(?,?,?,?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?),");
+		Csql_query q(m_database, "(?,?,?,?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?,?),");
 
 		int cleanup_interval = static_cast<int>(2.5 * m_config.m_announce_interval);
 		int min_cleanup = 3900; // 65 min
 		if( cleanup_interval < min_cleanup ) cleanup_interval = min_cleanup;
 
+		// TorrentPier
+		std::string port_st, ip_st, peer_hash;
+		port_st = ntohs(v.m_port);
+		ip_st = hex_encode(8, ntohl(v.m_ipa));
+		peer_hash = md5(v.m_info_hash+v.m_passkey+port_st+ip_st);
+
 		q.p(file.fid); // torrent_id mediumint(8) unsigned NOT NULL default '0',
 		q.p(v.m_peer_id); // peer_id char(20) binary NOT NULL default '',
+		q.p(peer_hash);
 		q.p(user->uid); // user_id mediumint(9) NOT NULL default '0',
 		q.p(hex_encode(8, ntohl(v.m_ipa))); // ip char(8) binary NOT NULL default '0',
 		q.p(const_memory_range(v.m_ipv6bin, ipv6set ? 16 : 0)); // ipv6 varchar(32)
 		q.p(ntohs(v.m_port)); // port smallint(5) unsigned NOT NULL default '0',
 		q.p(uploaded); // uploaded bigint(20) unsigned NOT NULL default '0',
 		q.p(downloaded_db); // downloaded bigint(20) unsigned NOT NULL default '0',
-		q.p(v.m_left ? (v.m_left>=file.tor_size ? 0 : ((file.tor_size-v.m_left)*100/file.tor_size)) : v.m_uploaded); // complete_percent bigint(20) unsigned NOT NULL default '0',
 		q.p(v.m_left && v.m_event != Ctracker_input::e_paused ? 0 : 1); // seeder tinyint(1) NOT NULL default '0',
-		// last_stored_up bigint(20) unsigned NOT NULL default '0',
-		// last_stored_down bigint(20) unsigned NOT NULL default '0',
-		// stat_last_updated int(11) NOT NULL default '0',
+		q.p(user->uid==file.tor_poster_id),// releaser
+		q.p(v.m_left ? (v.m_left>=file.tor_size ? 0 : ((file.tor_size-v.m_left)*100/file.tor_size)) : v.m_uploaded); // complete_percent bigint(20) unsigned NOT NULL default '0',
 		q.p(upspeed); // speed_up mediumint(8) unsigned NOT NULL default '0',
 		q.p(downspeed); // speed_down mediumint(8) unsigned NOT NULL default '0',
 		q.p(time()); // update_time int(11) NOT NULL default '0',
-		q.p(v.m_event == Ctracker_input::e_stopped ? time() : time() + cleanup_interval); // expire_time int(11) NOT NULL default '0',
-		// q.p(i == file.peers.end() ? 2 : i->second.listening ? 1 : 0); // port_open
 		q.p(xbt_error);
 		q.p( ul_16k_count*3 > ul_gdc_count*2 ? ul_gdc_16k : ul_gdc );
 		q.p(ul_gdc_count);
@@ -519,28 +530,38 @@ std::string Cserver::insert_peer(const Ctracker_input& v, bool udp, t_user* user
 
 		if (downloaded || uploaded)
 		{
-			Csql_query q(m_database, "(?,?,?,?,?,?),");
+			Csql_query q(m_database, "(?,?,?,?,?,?,?),");
 			q.p(downloaded_db);
 			q.p(uploaded);
 			q.p(user->uid);
-		//	q.p(bonus_rate ? uploaded * bonus_rate / 100 : 0);
-                        q.p(bonus_rate ? uploaded * bonus_rate / 100 + m_config.m_write_db_interval / 3600 * m_config.m_bonus_mb_per_hour : 0);
+			q.p(rel);
+			q.p(bonus ? uploaded/bonus : 0);
 			q.p(upspeed);
 			q.p(downspeed);
 			m_users_updates_buffer += q.read();
 		}
+
+		// Double tracker fix
+		if (v.m_event == Ctracker_input::e_completed && downloaded)
+			file.completed++, file.completed_inc++;
 	}
+	else
+	{
+		if (v.m_event == Ctracker_input::e_completed)
+			file.completed++, file.completed_inc++;
+	}
+
 	if (v.m_event == Ctracker_input::e_stopped)
 		file.peers.erase(peer_key);
 	else
 	{
 		t_peer& peer = file.peers[peer_key];
-		peer.downloaded = v.m_downloaded;
+		peer.downloaded = i && v.m_downloaded < i->downloaded ? i->downloaded : v.m_downloaded;
 		peer.left = v.m_left == 0 ? e_seeder : v.m_event == Ctracker_input::e_paused ? e_incomplete : e_downloader;
 		// std::copy(v.m_peer_id.begin(), v.m_peer_id.end(), peer.peer_id.begin());
 		peer.port = v.m_port;
 		peer.uid = user ? user->uid : 0;
-		peer.uploaded = v.m_uploaded;
+		peer.uploaded = i && v.m_uploaded < i->uploaded ? i->uploaded : v.m_uploaded;
 
 		file.speed_ul += ( peer.speed_ul = upspeed );
 		file.speed_dl += ( peer.speed_dl = downspeed );
@@ -569,8 +590,6 @@ std::string Cserver::insert_peer(const Ctracker_input& v, bool udp, t_user* user
 
 		peer.mtime = time();
 	}
-	if (v.m_event == Ctracker_input::e_completed)
-		file.completed++, file.completed_inc++;
 
 	// TorrentPier: Fill seeder_last_seen & last_seeder_uid fields
 	if (user && !v.m_left)
@@ -771,7 +790,7 @@ Cvirtual_binary Cserver::scrape(const Ctracker_input& ti)
 		Csql_query q(m_database, "(?,?,?),");
 		q.p(ntohl(ti.m_ipa));
 		if (ti.m_info_hash.empty())
-			q.p_raw("null");
+			q.p_raw(const_memory_range("null"));
 		else
 			q.p(ti.m_info_hash);
 		q.p(time());
@@ -795,7 +814,7 @@ Cvirtual_binary Cserver::scrape(const Ctracker_input& ti)
 				w += i.first.size();
 				w = write_compact_int(w, i.second.seeders);
 				w = write_compact_int(w, i.second.leechers);
-				w = write_compact_int(w, i.second.completed);
+				w = write_compact_int(w, std::min(i.second.completed, 1));
 			}
 			d.resize(w - d);
 			return d;
@@ -812,9 +831,8 @@ Cvirtual_binary Cserver::scrape(const Ctracker_input& ti)
 		m_stats.scraped_http++;
 		BOOST_FOREACH(Ctracker_input::t_info_hashes::const_reference j, ti.m_info_hashes)
 		{
-			t_files::const_iterator i = m_files.find(j);
-			if (i != m_files.end())
-				d += (boost::format("20:%sd8:completei%de10:downloadedi%de10:incompletei%dee") % i->first % i->second.seeders % i->second.completed % i->second.leechers).str();
+			if (t_file* i = find_ptr(m_files, j))
+				d += (boost::format("20:%sd8:completei%de10:downloadedi%de10:incompletei%dee") % j % i->seeders % i->completed % i->leechers).str();
 		}
 	}
 	d += "e";
@@ -873,7 +891,7 @@ void Cserver::read_db_files()
 		}
 		for (t_files::iterator i = m_files.begin(); i != m_files.end(); )
 		{
-			if (new_files.find(i->first) == new_files.end())
+			if (!new_files.count(i->first))
 				m_files.erase(i++);
 			else
 				i++;
@@ -924,20 +942,19 @@ void Cserver::read_db_files_sql()
 		if (m_files.empty())
 			m_database.query("update " + table_name(table_files) + " set "
 				+ column_name(column_files_leechers) + " = 0, "
-				+ column_name(column_files_seeders) + " = 0, speed_ul=0, speed_dl=0");
+				+ column_name(column_files_seeders) + " = 0, speed_up=0, speed_down=0");
 		else if (m_config.m_auto_register)
 			return;
 		q = "select rpad(bt.info_hash,20,' '), bt.?, bt.?, bt.reg_time, bt.size, bt.attach_id, bt.topic_id, bt.poster_id, "
-			+ column_name(column_files_dl_percent) + " from ? bt where ? >= ?";
+			+ column_name(column_files_dl_percent) + " from ? bt where reg_time >= ?";
 		q.p_name(column_name(column_files_completed));
 		q.p_name(column_name(column_files_fid));
 		q.p_name(table_name(table_files));
-		q.p_name(column_name(column_files_fid));
 		q.p(m_fid_end);
 		Csql_result result = q.execute();
 		for (Csql_row row; row = result.fetch_row(); )
 		{
-			m_fid_end = std::max(m_fid_end, static_cast<int>(row[2].i()) + 1);
+			m_fid_end = std::max(m_fid_end, static_cast<int>(row[3].i()) + 1);
 			if (row[0].size() != 20 || m_files.find(row[0].s()) != m_files.end())
 				continue;
 			t_file& file = m_files[row[0].s()];
@@ -969,7 +986,7 @@ void Cserver::read_db_users()
 	{
 		// TorrentPier begin
 		Csql_query q(m_database, "select ?, auth_key, " + column_name(column_users_can_leech) + ", "
-			+ column_name(column_users_torrents_limit) + " from ?");
+			+ column_name(column_users_torrents_limit) + ", user_vip, user_vip_exp, user_park, u.user_active from ? bt LEFT JOIN bb_users u ON (u.user_id=bt.user_id)");
 		// TorrentPier end
 
 		q.p_name(column_name(column_users_uid));
@@ -989,6 +1006,10 @@ void Cserver::read_db_users()
 			user.torrents_limit = row[3].i();
 			user.peers_limit = 4; // # of IP addresses user can leech from
 			user.can_leech = row[2].i();
+			user.user_vip = row[4].i();
+			user.user_vip_exp = row[5].i();
+			user.user_park = row[6].i();
+			user.user_active = row[7].i();
 			if (row[1].size()) {
 				user.passkey = row[1].s();
 				m_users_torrent_passes[user.passkey] = &user;
@@ -1031,7 +1052,7 @@ void Cserver::write_db_files()
 			}
 
 			// TorrentPier begin
-			Csql_query q(m_database, "(?,?,?,?,?,?, ?,?),");
+			Csql_query q(m_database, "(?,?,?,?,?,?,?,?),");
 			q.p(file.leechers);
 			q.p(file.seeders);
 			q.p(file.completed_inc); file.completed_inc = 0;
@@ -1055,9 +1076,9 @@ void Cserver::write_db_files()
 				+ column_name(column_files_seeders) + ", "
 				+ column_name(column_files_completed) + ", "
 				+ column_name(column_files_fid)
-				+ ", seeder_last_seen, last_seeder_uid, speed_ul, speed_dl) values "
+				+ ", seeder_last_seen, last_seeder_uid, speed_up, speed_down) values "
 				+ buffer
-				+ " on duplicate key update speed_ul=values(speed_ul), speed_dl=values(speed_dl),"
+				+ " on duplicate key update speed_up=values(speed_up), speed_down=values(speed_down),"
 				+ "  " + column_name(column_files_leechers) + " = values(" + column_name(column_files_leechers) + "),"
 				+ "  " + column_name(column_files_seeders) + " = values(" + column_name(column_files_seeders) + "),"
 				+ "  " + column_name(column_files_completed) + " = " + column_name(column_files_completed) + " + values(" + column_name(column_files_completed) + "),"
@@ -1108,11 +1129,12 @@ void Cserver::write_db_users()
 		try
 		{
 			m_database.query("insert into " + table_name(table_files_users)
-				+ " (torrent_id, peer_id, user_id, ip, ipv6, port, uploaded, downloaded, complete_percent, seeder, speed_up, speed_down, update_time, expire_time, xbt_error, ul_gdc, ul_gdc_c, ul_16k_c, ul_eq_dl) values "
+				+ " (topic_id, peer_id, peer_hash, user_id, ip, ipv6, port, uploaded, downloaded, seeder, releaser, complete_percent, speed_up, speed_down, update_time, xbt_error, ul_gdc, ul_gdc_c, ul_16k_c, ul_eq_dl) values "
 				+ m_files_users_updates_buffer
 				+ " on duplicate key update"
-				+ "  torrent_id = values(torrent_id),"
+				+ "  topic_id = values(topic_id),"
 				+ "  peer_id = values(peer_id),"
+				+ "  peer_hash = values(peer_hash),"
 				+ "  user_id = values(user_id),"
 				+ "  ip = values(ip), ipv6 = values(ipv6),"
 				+ "  port = values(port),"
@@ -1120,12 +1142,14 @@ void Cserver::write_db_users()
 				+ "  downloaded = downloaded + values(downloaded),"
 				+ "  complete_percent = values(complete_percent),"
 				+ "  seeder = values(seeder),"
+				+ "  releaser = values(releaser),"
 				+ "  speed_up = values(speed_up),"
 				+ "  speed_down = values(speed_down),"
+				+ "  up_add = up_add + values(uploaded),"
+				+ "  down_add = down_add + values(downloaded),"
 				+ "  update_time = values(update_time),"
-				+ "  expire_time = values(expire_time),"
 				+ "  xbt_error=values(xbt_error), ul_gdc=values(ul_gdc), ul_gdc_c=values(ul_gdc_c), ul_16k_c=values(ul_16k_c), ul_eq_dl=values(ul_eq_dl),"
-				+ " last_stored_up=uploaded,last_stored_down=downloaded,stat_last_updated=values(update_time)");
+				+ "  last_stored_up=uploaded, last_stored_down=downloaded, stat_last_updated=values(update_time)");
 		}
 		catch (Cdatabase::exception&)
 		{
@@ -1137,17 +1161,21 @@ void Cserver::write_db_users()
 		m_users_updates_buffer.erase(m_users_updates_buffer.size() - 1);
 		try
 		{
-			m_database.query("insert into " + table_name(table_users) + " (u_down_total, u_up_total, " + column_name(column_users_uid) + ", u_bonus_total, max_up_speed, max_down_speed) values "
+			m_database.query("insert into " + table_name(table_users) + " (u_down_total, u_up_total, " + column_name(column_users_uid) + ", u_up_release, u_up_bonus, max_up_speed, max_down_speed) values "
 				+ m_users_updates_buffer
 				+ " on duplicate key update"
 				+ "  u_down_total = u_down_total + values(u_down_total),"
 				+ "  u_up_total = u_up_total + values(u_up_total),"
-				+ "  u_bonus_today = u_bonus_today + values(u_bonus_total),"
-				+ "  u_down_today = u_down_today + values(u_down_total),"
-				+ "  u_up_today = u_up_today + values(u_up_total),"
-				+ "  u_bonus_total = u_bonus_total + values(u_bonus_total),"
+				+ "  u_up_release = u_up_release + values(u_up_release),"
+				+ "  u_up_bonus = u_up_bonus + values(u_up_bonus),"
 				+ "  max_up_speed = GREATEST(max_up_speed, values(max_up_speed)),"
-				+ "  max_down_speed = GREATEST(max_down_speed, values(max_down_speed))");
+				+ "  max_down_speed = GREATEST(max_down_speed, values(max_down_speed)),"
+				+ "  down_today = down_today + values(u_down_total),"
+				+ "  up_today = up_today + values(u_up_total),"
+				+ "  release_today = release_today + values(u_up_release),"
+				+ "  bonus_today = bonus_today + values(u_up_bonus),"
+				+ "  speed_up_today = GREATEST(speed_up_today, values(max_up_speed)),"
+				+ "  speed_down_today = GREATEST(speed_down_today, values(max_down_speed))");
 		}
 		catch (Cdatabase::exception&)
 		{
@@ -1159,7 +1187,7 @@ void Cserver::write_db_users()
 		m_users_dl_status_buffer.erase(m_users_dl_status_buffer.size() - 1);
 		try
 		{
-			m_database.query("insert into bb_bt_users_dl_status(topic_id,user_id,user_status,update_time) values"
+			m_database.query("insert into " + table_name(table_users_dlstatus) + " (topic_id,user_id,user_status,update_time) values"
 				+ m_users_dl_status_buffer
 				+ " on duplicate key update"
 				+ "  update_time = case when user_status = values(user_status) then update_time else values(update_time) end,"
@@ -1175,17 +1203,52 @@ void Cserver::write_db_users()
 		m_tor_dl_stat_buffer.erase(m_tor_dl_stat_buffer.size() - 1);
 		try
 		{
-			m_database.query("insert into bb_bt_tor_dl_stat(torrent_id,user_id,attach_id,t_up_total,t_down_total,t_bonus_total) values"
+			m_database.query("insert into " + table_name(table_torrents_activity) + " (user_id,topic_id,torrent_upload,torrent_download,torrent_speed_up,torrent_speed_down,torrent_dl_status,torrent_bonus,torrent_status,torrent_all_download,torrent_time_st,torrent_time) values"
 				+ m_tor_dl_stat_buffer
 				+ " on duplicate key update"
-				+ "  t_up_total = t_up_total + values(t_up_total),"
-				+ "  t_bonus_total = t_bonus_total + values(t_bonus_total),"
-				+ "  t_down_total = t_down_total + values(t_down_total)");
+				+ "  torrent_upload = torrent_upload + values(torrent_upload),"
+				+ "  torrent_speed_up = GREATEST(torrent_speed_up, values(torrent_speed_up)),"
+				+ "  torrent_speed_down = GREATEST(torrent_speed_down, values(torrent_speed_down)),"
+				+ "  torrent_download = torrent_download + values(torrent_download),"
+				+ "  torrent_all_download = torrent_all_download + values(torrent_all_download),"
+				+ "  torrent_time = torrent_time + values(torrent_time),"
+			 	+ "  torrent_status = GREATEST(torrent_status, values(torrent_status)),"
+				+ "  torrent_bonus = torrent_bonus + values(torrent_bonus)");
 		}
 		catch (Cdatabase::exception&)
 		{
 		}
 		m_tor_dl_stat_buffer.erase();
+	}
+	//cheat
+	if (!m_cheat_buffer.empty())
+	{
+		m_cheat_buffer.erase(m_cheat_buffer.size() - 1);
+		try
+		{
+			m_database.query("insert into bb_bt_cheat_log(cheat_user_id, cheat_uploaded, cheat_ip, cheat_log_time) values"
+				+ m_cheat_buffer);
+		}
+		catch (Cdatabase::exception&)
+		{
+		}
+		m_cheat_buffer.erase();
+	}
+	//vip
+	if (!m_vip_buffer.empty())
+	{
+		m_vip_buffer.erase(m_vip_buffer.size() - 1);
+		try
+		{
+			m_database.query("UPDATE bb_bt_users SET user_vip = 0 WHERE user_id IN"
+				+ m_vip_buffer );
+			m_database.query("UPDATE bb_users SET user_rank = 0 WHERE user_rank = 20 AND user_id IN"
+				+ m_vip_buffer );
+		}
+		catch (Cdatabase::exception&)
+		{
+		}
+		m_vip_buffer.erase();
 	}
 }
 // TorrentPier end
@@ -1278,9 +1341,8 @@ std::string Cserver::debug(const Ctracker_input& ti) const
 	}
 	else
 	{
-		t_files::const_iterator i = m_files.find(ti.m_info_hash);
-		if (i != m_files.end())
-			i->second.debug(os);
+		if (const t_file* i = find_ptr(m_files, ti.m_info_hash))
+			i->debug(os);
 	}
 	os << "</table>";
 	return os.str();
@@ -1357,7 +1419,7 @@ std::string Cserver::statistics() const
 			<< "<tr><td>write db files time<td align=right>" << t - m_write_db_files_time << " / " << m_config.m_write_db_interval
 			<< "<tr><td>write db users time<td align=right>" << t - m_write_db_users_time << " / " << m_config.m_write_db_interval;
 	}
-	os << "</table>";
+	os << "</table><font size=2><div align=\"right\"><a href=\"http://torrentpier.com\">Adapted by Exile</a></div></font>";
 	return os.str();
 }
 
@@ -1371,14 +1433,13 @@ Cserver::t_user* Cserver::find_user_by_torrent_pass(const std::string& v, const 
 	}
 	// TorrentPier end
 
-	t_users_torrent_passes::const_iterator i = m_users_torrent_passes.find(v);
-	return i == m_users_torrent_passes.end() ? NULL : i->second;
+	t_user** i = find_ptr(m_users_torrent_passes, v);
+	return i ? *i : NULL;
 }
 
 Cserver::t_user* Cserver::find_user_by_uid(int v)
 {
-	t_users::iterator i = m_users.find(v);
-	return i == m_users.end() ? NULL : &i->second;
+	return find_ptr(m_users, v);
 }
 
 void Cserver::sig_handler(int v)
@@ -1454,36 +1515,34 @@ int Cserver::test_sql()
 		return 0;
 	try
 	{
-		mysql_get_server_version(&m_database.handle());
-		if (m_config.m_log_announce)
-			m_database.query("select id, ipa, port, event, info_hash, peer_id, downloaded, left0, uploaded, uid, mtime from " + table_name(table_announce_log) + " where 0");
+		/*mysql_get_server_version(m_database.handle());
+		//xbtt
+		m_database.query("select id, ipa, port, event, info_hash, peer_id, downloaded, left0, uploaded, uid, mtime from " + table_name(table_announce_log) + " where 0");
 		m_database.query("select name, value from " + table_name(table_config) + " where 0");
-		m_database.query("select begin, end from " + table_name(table_deny_from_hosts) + " where 0");
-		if (m_config.m_log_scrape)
-			m_database.query("select id, ipa, info_hash, uid, mtime from " + table_name(table_scrape_log) + " where 0");
+		\m_database.query("select begin, end from " + table_name(table_deny_from_hosts) + " where 0");
+		m_database.query("select id, ipa, info_hash, uid, mtime from " + table_name(table_scrape_log) + " where 0");
 
 		// TorrentPier begin
-		m_database.query("select torrent_id, peer_id, user_id, ip, ipv6, port, uploaded, downloaded, complete_percent, seeder, speed_up, speed_down, update_time, expire_time, ul_gdc, ul_gdc_c, ul_16k_c, ul_eq_dl from " + table_name(table_files_users) + " where 0"); // Note: `port_open` is not used any more
+		m_database.query("select peer_hash, user_id, ip, ipv6, port, uploaded, downloaded, seeder, speed_up, speed_down, update_time, ul_gdc, ul_gdc_c, ul_16k_c, ul_eq_dl from " + table_name(table_files_users) + " where 0"); // Note: `port_open` is not used any more
 		m_database.query("select " + column_name(column_users_uid) + ", auth_key, "
-                  + column_name(column_users_can_leech) + " as u_cl, " + column_name(column_users_torrents_limit)
-                  + " as u_tl, u_down_total, u_up_total, u_bonus_total, u_down_today, u_up_today, u_bonus_today, max_up_speed, max_down_speed from " + table_name(table_users) + " where 0");
-		m_database.query("select " + column_name(column_files_fid) + ", info_hash, "
-                  + column_name(column_files_leechers) + ", " + column_name(column_files_seeders)
-                  + ", bt.reg_time, bt.size, bt.attach_id, bt.topic_id, bt.seeder_last_seen, bt.last_seeder_uid, bt.speed_ul, bt.speed_dl, bt.poster_id, "
-                  + column_name(column_files_dl_percent) + " from " + table_name(table_files) + " bt where 0");
+                + column_name(column_users_can_leech) + " as u_cl, " + column_name(column_users_torrents_limit)
+                + " as u_tl, u_down_total, u_up_total, u_up_release, u_down_today, u_up_today, u_up_bonus, max_up_speed, max_down_speed from " + table_name(table_users) + " where 0");
+	
+		m_database.query("select bbt.info_hash, bt.seeder, bbt.reg_time, bbt.size, bbt.attach_id, bbt.topic_id, bbt.seeder_last_seen, bt.speed_up, bt.speed_down, bbt.poster_id, "
+                   + column_name(column_files_dl_percent) + " from " + table_name(table_files) + " bbt LEFT JOIN bb_bt_tracker bt ON (bt.topic_id = bbt.topic_id) where 0");
 		// TorrentPier: Files deletion table = table_name(table_files) + "_del" suffix
-		m_database.query("select rpad(info_hash,20,' '), " + column_name(column_files_fid)
-                  + ", is_del, dl_percent from " + table_name(table_files) + "_del where 0");
-		m_database.query("select topic_id,user_id,user_status,update_time from bb_bt_users_dl_status where 0");
+		\m_database.query("select rpad(info_hash,20,' '), " + column_name(column_files_fid)
+                \+ ", is_del, dl_percent from " + table_name(table_files) + " where 0");
+		m_database.query("select topic_id,user_id,user_status,last_modified_dlstatus from bb_bt_dlstatus_main where 0");
 		m_database.query("select torrent_id,user_id,attach_id,t_up_total,t_down_total,t_bonus_total from bb_bt_tor_dl_stat where 0");
 		// TorrentPier end
 
 		m_read_users_can_leech = m_database.query("show columns from " + table_name(table_users) + " like 'can_leech'");
 		m_read_users_peers_limit = m_database.query("show columns from " + table_name(table_users) + " like 'peers_limit'");
 		m_read_users_torrent_pass = m_database.query("show columns from " + table_name(table_users) + " like 'torrent_pass'");
-		m_read_users_torrent_pass_version = m_database.query("show columns from " + table_name(table_users) + " like 'torrent_pass_version'");
 		m_read_users_torrents_limit = m_database.query("show columns from " + table_name(table_users) + " like 'torrents_limit'");
 		m_read_users_wait_time = m_database.query("show columns from " + table_name(table_users) + " like 'wait_time'");
+		*/
 		return 0;
 	}
 	catch (Cdatabase::exception&)

@@ -63,12 +63,15 @@ public:
 	bool m_gdc;
 	bool m_free_leech;
 	int m_max_seeds_bonus;
-        int m_bonus_mb_per_hour;
+	int m_bonus_mb_per_hour;
+	std::string m_table_users_dlstatus;
+	std::string m_table_torrents_activity;
 	std::string m_column_files_dl_percent;
 	std::string m_column_users_can_leech;
 	std::string m_column_users_torrents_limit;
 	int m_read_files_interval;
 	bool m_trust_ipv6;
+	int m_cheat_upload;
 	// TorrentPier end
 
 private:

@@ -8,7 +8,6 @@ g++ $@ -DEPOLL -DNDEBUG -I ../misc -I . -O3 -o xbt_tracker \
 	../misc/socket.cpp \
 	../misc/virtual_binary.cpp \
 	../misc/xcc_z.cpp \
-	client.cpp \
 	config.cpp \
 	connection.cpp \
 	epoll.cpp \
@@ -18,4 +17,4 @@ g++ $@ -DEPOLL -DNDEBUG -I ../misc -I . -O3 -o xbt_tracker \
 	transaction.cpp \
 	udp_listen_socket.cpp \
 	"XBT Tracker.cpp" \
-	`mysql_config --libs` && strip xbt_tracker
+	`mysql_config --libs` -lz && strip xbt_tracker

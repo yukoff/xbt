@@ -10,6 +10,7 @@ addons:
       - libboost-dev
       - libmysqlclient-dev
       - zlib1g-dev
+      - valgrind
 before_install:
   - export OCLINT_HOME="$HOME/oclint"
   - export PATH="$OCLINT_HOME/bin:$PATH"
@@ -24,7 +25,9 @@ before_install:
 script:
   - mkdir build
   - cd build
-  - cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ../Tracker
+  - cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_BUILD_TYPE=debug ../Tracker
+  - make
+  - valgrind --error-exitcode=42 --leak-check=full ./xbt_tracker
   - cd ..
-  - cp build/compile_commands.json .
-  - oclint-json-compilation-database
+  # - cp build/compile_commands.json .
+  # - oclint-json-compilation-database
